@@ -1,0 +1,62 @@
+
+name: Build ArmorPaint for Windows
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - name: Get ArmorPaint source
+        uses: actions/checkout@v4
+        with:
+          repository: armory3d/armorpaint
+          ref: main
+
+      - name: Locate Visual Studio tools
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Generate Windows project
+        shell: cmd
+        working-directory: paint
+        run: ..\base\make
+
+      - name: Compile ArmorPaint
+        shell: cmd
+        working-directory: paint
+        run: msbuild build\ArmorPaint.sln /m /p:Configuration=Release /p:Platform=x64
+
+      - name: Collect build output
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem paint -Filter ArmorPaint.exe -Recurse |
+            Where-Object { $_.FullName -notmatch '\\obj\\' } |
+            Select-Object -First 1
+
+          if (-not $exe) {
+            throw "ArmorPaint.exe was not found. Check the build logs."
+          }
+
+          New-Item -ItemType Directory -Force package | Out-Null
+          Copy-Item $exe.FullName package\
+
+          $data = Get-ChildItem paint -Directory -Recurse |
+            Where-Object { $_.Name -eq 'data' } |
+            Select-Object -First 1
+
+          if ($data) {
+            Copy-Item $data.FullName package\data -Recurse
+          }
+
+          Compress-Archive package\* ArmorPaint-Windows.zip -Force
+
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: ArmorPaint-Windows
+          path: ArmorPaint-Windows.zip
+          if-no-files-found: error
