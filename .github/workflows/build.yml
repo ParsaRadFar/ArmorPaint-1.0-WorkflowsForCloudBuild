@@ -19,86 +19,62 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
-      - name: Diagnose & prepare amake
-        shell: pwsh
-        run: |
-          $amake = Resolve-Path "base\tools\bin\windows_x64\amake.exe" -ErrorAction SilentlyContinue
-          if (-not $amake) {
-            Write-Host "=== Listing base/tools/bin ==="
-            Get-ChildItem base\tools\bin -Recurse | Select-Object FullName, Length
-            throw "amake.exe not found after checkout"
-          }
-
-          Write-Host "amake.exe found: $amake  ($((Get-Item $amake).Length) bytes)"
-
-          # Strongly try to keep Defender away from it
-          try {
-            Add-MpPreference -ExclusionPath $amake.Path -ErrorAction SilentlyContinue
-            Add-MpPreference -ExclusionPath (Split-Path $amake.Path) -ErrorAction SilentlyContinue
-            Unblock-File $amake.Path -ErrorAction SilentlyContinue
-          } catch {}
-
-          # Show file attributes / zone identifier
-          Get-Item $amake | Format-List *
-          Get-Content "$($amake.Path):Zone.Identifier" -ErrorAction SilentlyContinue
-
-      - name: Generate Windows project (with full output)
+      - name: Generate Windows project
         shell: pwsh
         working-directory: paint
         run: |
-          $ErrorActionPreference = "Continue"
-
           Write-Host "Current directory: $(Get-Location)"
-          Write-Host "Calling ..\base\make ..."
+          ..\base\make
 
-          # Run amake directly so we see every message
-          $amake = Resolve-Path "..\base\tools\bin\windows_x64\amake.exe"
-          & $amake 2>&1 | ForEach-Object { Write-Host $_ }
-
-          $exitCode = $LASTEXITCODE
-          Write-Host "amake exit code: $exitCode"
-
-          Write-Host "`n=== Contents of paint\ after generate ==="
-          Get-ChildItem -Force | Format-Table Name, Mode, Length
-
-          if (Test-Path "build") {
-            Write-Host "`n=== Contents of paint\build\ ==="
-            Get-ChildItem build -Recurse -Force | Select-Object FullName, Length | Format-Table -AutoSize
-          } else {
-            Write-Host "No 'build' directory was created"
+          if (-not (Test-Path "build\ArmorPaint.slnx") -and -not (Test-Path "build\ArmorPaint.sln")) {
+            Write-Host "=== Contents of paint\build\ ==="
+            Get-ChildItem build -ErrorAction SilentlyContinue | Format-Table Name
+            throw "Neither ArmorPaint.slnx nor ArmorPaint.sln was generated"
           }
 
-          if (-not (Test-Path "build\ArmorPaint.sln")) {
-            throw "ArmorPaint.sln was NOT generated. See output above."
-          }
-
-          Write-Host "SUCCESS: build\ArmorPaint.sln exists"
+          Write-Host "Project files generated successfully"
 
       - name: Compile ArmorPaint
         shell: cmd
         working-directory: paint
-        run: msbuild build\ArmorPaint.sln /m /p:Configuration=Release /p:Platform=x64 /v:minimal
+        run: |
+          if exist build\ArmorPaint.slnx (
+            msbuild build\ArmorPaint.slnx /m /p:Configuration=Release /p:Platform=x64 /v:minimal
+          ) else (
+            msbuild build\ArmorPaint.sln /m /p:Configuration=Release /p:Platform=x64 /v:minimal
+          )
 
       - name: Collect build output
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
-
           $exe = Get-ChildItem paint -Filter ArmorPaint.exe -Recurse |
-                 Where-Object { $_.FullName -notmatch '\\obj\\|\\Debug\\' } |
-                 Select-Object -First 1
+            Where-Object { $_.FullName -notmatch '\\obj\\' } |
+            Select-Object -First 1
 
-          if (-not $exe) { throw "ArmorPaint.exe not found after build" }
+          if (-not $exe) {
+            throw "ArmorPaint.exe was not found. Check the build logs."
+          }
+
+          Write-Host "Found executable: $($exe.FullName)"
 
           New-Item -ItemType Directory -Force package | Out-Null
-          Copy-Item $exe.FullName package\ArmorPaint.exe
+          Copy-Item $exe.FullName package\
 
-          $data = @("paint\build\out\data", "paint\build\data", "paint\data") |
-                  Where-Object { Test-Path $_ } |
-                  Select-Object -First 1
+          # Prefer the already-exported data folder
+          $data = $null
+          if (Test-Path "paint\build\out\data") {
+            $data = Get-Item "paint\build\out\data"
+          } else {
+            $data = Get-ChildItem paint -Directory -Recurse |
+              Where-Object { $_.Name -eq 'data' } |
+              Select-Object -First 1
+          }
 
           if ($data) {
-            Copy-Item $data package\data -Recurse
+            Write-Host "Copying data from: $($data.FullName)"
+            Copy-Item $data.FullName package\data -Recurse
+          } else {
+            Write-Host "WARNING: data folder not found"
           }
 
           Compress-Archive package\* ArmorPaint-Windows.zip -Force
