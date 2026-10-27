@@ -1,4 +1,3 @@
-
 name: Build ArmorPaint for Windows
 
 on:
@@ -17,8 +16,21 @@ jobs:
           repository: armory3d/armorpaint
           ref: main
 
-      - name: Locate Visual Studio tools
+      - name: Setup MSBuild + ensure Clang
         uses: microsoft/setup-msbuild@v2
+
+      # Optional but recommended: make sure the Clang component is present
+      # (Windows runners usually have it, but this makes the job more robust)
+      - name: Ensure C++ Clang tools
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Llvm.Clang -property installationPath
+          if (-not $installPath) {
+            Write-Host "Clang tools component may be missing – build may fail"
+          } else {
+            Write-Host "Clang tools found at $installPath"
+          }
 
       - name: Generate Windows project
         shell: cmd
@@ -28,31 +40,48 @@ jobs:
       - name: Compile ArmorPaint
         shell: cmd
         working-directory: paint
-        run: msbuild build\ArmorPaint.sln /m /p:Configuration=Release /p:Platform=x64
+        run: msbuild build\ArmorPaint.sln /m /p:Configuration=Release /p:Platform=x64 /v:minimal
 
       - name: Collect build output
         shell: pwsh
         run: |
-          $exe = Get-ChildItem paint -Filter ArmorPaint.exe -Recurse |
-            Where-Object { $_.FullName -notmatch '\\obj\\' } |
-            Select-Object -First 1
+          $ErrorActionPreference = "Stop"
 
-          if (-not $exe) {
-            throw "ArmorPaint.exe was not found. Check the build logs."
-          }
+          # Prefer the canonical Release location
+          $exeCandidates = @(
+            "paint\build\x64\Release\ArmorPaint.exe",
+            "paint\build\Release\ArmorPaint.exe"
+          ) + (Get-ChildItem paint -Filter ArmorPaint.exe -Recurse |
+                Where-Object { $_.FullName -notmatch '\\obj\\|\\Debug\\' } |
+                Select-Object -ExpandProperty FullName)
+
+          $exe = $exeCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $exe) { throw "ArmorPaint.exe was not found" }
+
+          Write-Host "Found executable: $exe"
 
           New-Item -ItemType Directory -Force package | Out-Null
-          Copy-Item $exe.FullName package\
+          Copy-Item $exe package\ArmorPaint.exe
 
-          $data = Get-ChildItem paint -Directory -Recurse |
-            Where-Object { $_.Name -eq 'data' } |
-            Select-Object -First 1
+          # Look for the data folder that belongs next to the executable
+          $dataCandidates = @(
+            "paint\build\out\data",
+            "paint\build\data",
+            "paint\data"
+          ) + (Get-ChildItem paint -Directory -Recurse |
+                Where-Object { $_.Name -eq 'data' } |
+                Select-Object -ExpandProperty FullName)
 
+          $data = $dataCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
           if ($data) {
-            Copy-Item $data.FullName package\data -Recurse
+            Write-Host "Found data folder: $data"
+            Copy-Item $data package\data -Recurse
+          } else {
+            Write-Warning "No data folder found – the resulting package may not run"
           }
 
           Compress-Archive package\* ArmorPaint-Windows.zip -Force
+          Write-Host "Created ArmorPaint-Windows.zip"
 
       - name: Upload Windows build
         uses: actions/upload-artifact@v4
